@@ -166,6 +166,7 @@ export type GetStaticPropsContext<
   preview?: boolean
   previewData?: Preview
   draftMode?: boolean
+  res?: ServerResponse
   locale?: string
   locales?: string[]
   defaultLocale?: string

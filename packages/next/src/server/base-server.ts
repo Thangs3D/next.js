@@ -287,6 +287,7 @@ export type RequestContext<
   pathname: string
   query: NextParsedUrlQuery
   renderOpts: RenderOpts
+  pathnameOverride?: string
 }
 
 // Internal wrapper around build errors at development
@@ -2613,11 +2614,15 @@ export default abstract class Server<
         ) {
           continue
         }
-
+        const pathnameOverride = match.definition.pathname
+        // Pass this up the call stack so it can be used for tracking
+        ctx.pathnameOverride = pathnameOverride
         const result = await this.renderPageComponent(
           {
             ...ctx,
-            pathname: match.definition.pathname,
+            // Use the overridden pathname if available, otherwise use the
+            // original pathname.
+            pathname: pathnameOverride,
             renderOpts: {
               ...ctx.renderOpts,
               params: match.params,

@@ -284,6 +284,12 @@ export const experimentalSchema = {
   taint: z.boolean().optional(),
   prerenderEarlyExit: z.boolean().optional(),
   proxyTimeout: z.number().gte(0).optional(),
+  prefetch: z
+    .object({
+      exclude: z.array(z.string()).optional(),
+      include: z.array(z.string()).optional(),
+    })
+    .optional(),
   rootParams: z.boolean().optional(),
   mcpServer: z.boolean().optional(),
   removeUncaughtErrorAndRejectionListeners: z.boolean().optional(),

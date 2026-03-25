@@ -1,5 +1,6 @@
 import type { ComponentType } from 'react'
 import type { DomainLocale } from '../../../server/config'
+import type { ExperimentalConfig } from '../../../server/config-shared'
 import type { MittEmitter } from '../mitt'
 import type { ParsedUrlQuery } from 'querystring'
 import type { RouterEvent } from '../../../client/router'
@@ -65,6 +66,7 @@ declare global {
 
 interface RouteProperties {
   shallow: boolean
+  isModelPage?: boolean
 }
 
 interface TransitionOptions {
@@ -102,6 +104,9 @@ interface MiddlewareEffectParams<T extends FetchDataOutput> {
 export async function matchesMiddleware<T extends FetchDataOutput>(
   options: MiddlewareEffectParams<T>
 ): Promise<boolean> {
+  // Skip call to server to run middleware.ts during client side navigation since everything in there
+  // is only needed for server side requests. This will improve client side navigation performance
+  if (typeof window !== 'undefined') return false
   const matchers = await Promise.resolve(
     options.router.pageLoader.getMiddleware()
   )
@@ -433,10 +438,15 @@ const manualScrollRestoration =
 
 const SSG_DATA_NOT_FOUND = Symbol('SSG_DATA_NOT_FOUND')
 
+const PREFETCH = process.env.__NEXT_PREFETCH as ExperimentalConfig['prefetch']
+const isModelPage = (pathname: string) =>
+  pathname.includes('/designer/[userName]/3d-model/[modelIdentifier]') &&
+  !pathname.includes('project')
+
 function fetchRetry(
   url: string,
   attempts: number,
-  options: Pick<RequestInit, 'method' | 'headers'>
+  options: Pick<RequestInit, 'method' | 'headers' | 'priority'>
 ): Promise<Response> {
   return fetch(url, {
     // Cookies are required to be present for Next.js' SSG "Preview Mode".
@@ -455,6 +465,7 @@ function fetchRetry(
     headers: Object.assign({}, options.headers, {
       'x-nextjs-data': '1',
     }),
+    priority: options.priority,
   }).then((response) => {
     return !response.ok && attempts > 1 && response.status >= 500
       ? fetchRetry(url, attempts - 1, options)
@@ -512,6 +523,7 @@ function fetchNextData({
         deploymentId ? { 'x-deployment-id': deploymentId } : {}
       ),
       method: params?.method ?? 'GET',
+      priority: isPrefetch ? 'low' : undefined,
     })
       .then((response) => {
         if (response.ok && params?.method === 'HEAD') {
@@ -1598,7 +1610,10 @@ export default class Router implements BaseRouter {
         query,
         as,
         resolvedAs,
-        routeProps,
+        routeProps: {
+          ...routeProps,
+          isModelPage: isModelPage(pathname),
+        },
         locale: nextState.locale,
         isPreview: nextState.isPreview,
         hasMiddleware: isMiddlewareMatch,
@@ -2037,7 +2052,10 @@ export default class Router implements BaseRouter {
 
     try {
       let existingInfo: PrivateRouteInfo | undefined = this.components[route]
-      if (routeProps.shallow && existingInfo && this.route === route) {
+      if (
+        (routeProps.isModelPage && existingInfo) ||
+        (routeProps.shallow && existingInfo && this.route === route)
+      ) {
         return existingInfo
       }
 
@@ -2162,7 +2180,7 @@ export default class Router implements BaseRouter {
           (res) => ({
             Component: res.page,
             styleSheets: res.styleSheets,
-            __N_SSG: res.mod.__N_SSG,
+            __N_SSG: isModelPage(pathname) ? false : res.mod.__N_SSG,
             __N_SSP: res.mod.__N_SSP,
           })
         ))
@@ -2516,6 +2534,9 @@ export default class Router implements BaseRouter {
     }
 
     const route = removeTrailingSlash(pathname)
+    const isPrefetchRoute =
+      (PREFETCH?.include && PREFETCH.include.includes(route)) ||
+      (PREFETCH?.exclude && !PREFETCH.exclude.includes(route))
 
     if (await this._bfl(asPath, resolvedAs, options.locale, true)) {
       this.components[urlPathname] = { __appRouter: true } as any
@@ -2523,12 +2544,14 @@ export default class Router implements BaseRouter {
 
     await Promise.all([
       this.pageLoader._isSsg(route).then((isSsg) => {
-        return isSsg
+        return isSsg || isPrefetchRoute
           ? fetchNextData({
               dataHref: data?.json
                 ? data?.dataHref
                 : this.pageLoader.getDataHref({
-                    href: url,
+                    href: isSsg
+                      ? url
+                      : formatWithValidation({ pathname: route, query }),
                     asPath: resolvedAs,
                     locale: locale,
                   }),
