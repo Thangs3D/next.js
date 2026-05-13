@@ -1,24 +1,25 @@
 import type { NextConfig } from '../../server/config-shared'
 import type { RouteHas } from '../../lib/load-custom-routes'
 
-import { promises as fs } from 'fs'
+import { readFileSync } from 'fs'
 import { relative } from 'path'
 import { LRUCache } from '../../server/lib/lru-cache'
-import {
-  extractExportedConstValue,
-  UnsupportedValueError,
-} from './extract-const-value'
+import { extractExportedConstValue } from './extract-const-value'
 import { parseModule } from './parse-module'
 import * as Log from '../output/log'
 import {
   SERVER_RUNTIME,
   MIDDLEWARE_FILENAME,
   PROXY_FILENAME,
+  RSC_SUFFIX,
+  RSC_SEGMENT_SUFFIX,
+  RSC_SEGMENTS_DIR_SUFFIX,
 } from '../../lib/constants'
 import { tryToParsePath } from '../../lib/try-to-parse-path'
 import { isAPIRoute } from '../../lib/is-api-route'
 import { isEdgeRuntime } from '../../lib/is-edge-runtime'
 import { RSC_MODULE_TYPES } from '../../shared/lib/constants'
+import { escapeStringRegexp } from '../../shared/lib/escape-regexp'
 import type { RSCMeta } from '../webpack/loaders/get-module-build-info'
 import { PAGE_TYPES } from '../../lib/page-types'
 import {
@@ -110,11 +111,20 @@ export interface PagesPageStaticInfo {
 
 export type PageStaticInfo = AppPageStaticInfo | PagesPageStaticInfo
 
+const APP_ROUTE_RSC_SUFFIX_MATCHER = escapeStringRegexp(RSC_SUFFIX)
+const APP_ROUTE_SEGMENT_PREFETCH_SUFFIX_MATCHER = `${escapeStringRegexp(RSC_SEGMENTS_DIR_SUFFIX)}/.+${escapeStringRegexp(RSC_SEGMENT_SUFFIX)}`
+const APP_ROUTE_TRANSPORT_SUFFIX_MATCHER = `${APP_ROUTE_RSC_SUFFIX_MATCHER}|${APP_ROUTE_SEGMENT_PREFETCH_SUFFIX_MATCHER}`
+const ROOT_APP_ROUTE_TRANSPORT_MATCHER = `/?index(?:${APP_ROUTE_TRANSPORT_SUFFIX_MATCHER})`
+const MIDDLEWARE_DATA_SUFFIX_MATCHER = `\\.json|${APP_ROUTE_TRANSPORT_SUFFIX_MATCHER}`
+const OPTIONAL_MIDDLEWARE_NEXT_DATA_PREFIX = '/:nextData(_next/data/[^/]{1,})?'
+
 const CLIENT_MODULE_LABEL =
   /\/\* __next_internal_client_entry_do_not_use__ ([^ ]*) (cjs|auto) \*\//
 
+// Match JSON object that may contain nested objects (for loc info)
+// The JSON ends right before the closing " */"
 const ACTION_MODULE_LABEL =
-  /\/\* __next_internal_action_entry_do_not_use__ (\{[^}]+\}) \*\//
+  /\/\* __next_internal_action_entry_do_not_use__ (\{.*\}) \*\//
 
 const CLIENT_DIRECTIVE = 'use client'
 const SERVER_ACTION_DIRECTIVE = 'use server'
@@ -125,8 +135,9 @@ export function getRSCModuleInformation(
   isReactServerLayer: boolean
 ): RSCMeta {
   const actionsJson = source.match(ACTION_MODULE_LABEL)
+  // Parse action metadata - supports both old format (string) and new format (object with loc)
   const parsedActionsMeta = actionsJson
-    ? (JSON.parse(actionsJson[1]) as Record<string, string>)
+    ? (JSON.parse(actionsJson[1]) as RSCMeta['actionIds'])
     : undefined
   const clientInfoMatch = source.match(CLIENT_MODULE_LABEL)
   const isClientRef = !!clientInfoMatch
@@ -424,9 +435,9 @@ function validateMiddlewareProxyExports({
   }
 }
 
-async function tryToReadFile(filePath: string, shouldThrow: boolean) {
+function tryToReadFile(filePath: string, shouldThrow: boolean) {
   try {
-    return await fs.readFile(filePath, {
+    return readFileSync(filePath, {
       encoding: 'utf8',
     })
   } catch (error: any) {
@@ -465,11 +476,17 @@ export function getMiddlewareMatchers(
       }`
     }
 
-    source = `/:nextData(_next/data/[^/]{1,})?${source}${
+    // Match transport-specific route forms that resolve to the same page.
+    // - Pages Router data routes: /_next/data/<build-id>/...
+    // - App Router transport routes: .rsc, ...segments/...segment.rsc
+    const sourceSuffix = `${
       isRoot
-        ? `(${nextConfig.i18n ? '|\\.json|' : ''}/?index|/?index\\.json)?`
-        : '{(\\.json)}?'
+        ? `(${
+            nextConfig.i18n ? '|\\.json|' : ''
+          }/?index|/?index\\.json|${ROOT_APP_ROUTE_TRANSPORT_MATCHER})?`
+        : `{(${MIDDLEWARE_DATA_SUFFIX_MATCHER})}?`
     }`
+    source = `${OPTIONAL_MIDDLEWARE_NEXT_DATA_PREFIX}${source}${sourceSuffix}`
 
     if (nextConfig.basePath) {
       source = `${nextConfig.basePath}${source}`
@@ -565,7 +582,7 @@ const warnedUnsupportedValueMap = new LRUCache<boolean>(250, () => 1)
 function warnAboutUnsupportedValue(
   pageFilePath: string,
   page: string | undefined,
-  error: UnsupportedValueError
+  result: { unsupported: string; path?: string }
 ) {
   hadUnsupportedValue = true
   const isProductionBuild = process.env.NODE_ENV === 'production'
@@ -584,8 +601,8 @@ function warnAboutUnsupportedValue(
     `Next.js can't recognize the exported \`config\` field in ` +
     (page ? `route "${page}"` : `"${pageFilePath}"`) +
     ':\n' +
-    error.message +
-    (error.path ? ` at "${error.path}"` : '') +
+    result.unsupported +
+    (result.path ? ` at "${result.path}"` : '') +
     '.\n' +
     'Read More - https://nextjs.org/docs/messages/invalid-page-config'
 
@@ -612,7 +629,7 @@ export async function getAppPageStaticInfo({
   isDev,
   page,
 }: GetPageStaticInfoParams): Promise<AppPageStaticInfo> {
-  const content = await tryToReadFile(pageFilePath, !isDev)
+  const content = tryToReadFile(pageFilePath, !isDev)
   if (!content || !PARSE_PATTERN.test(content)) {
     return {
       type: PAGE_TYPES.APP,
@@ -645,23 +662,20 @@ export async function getAppPageStaticInfo({
   const exportedConfig: Record<string, unknown> = {}
   if (exports) {
     for (const property of exports) {
-      try {
-        exportedConfig[property] = extractExportedConstValue(ast, property)
-      } catch (e) {
-        if (e instanceof UnsupportedValueError) {
-          warnAboutUnsupportedValue(pageFilePath, page, e)
-        }
+      const result = extractExportedConstValue(ast, property)
+      if (result !== null && 'unsupported' in result) {
+        warnAboutUnsupportedValue(pageFilePath, page, result)
+      } else if (result !== null) {
+        exportedConfig[property] = result.value
       }
     }
   }
 
-  try {
-    exportedConfig.config = extractExportedConstValue(ast, 'config')
-  } catch (e) {
-    if (e instanceof UnsupportedValueError) {
-      warnAboutUnsupportedValue(pageFilePath, page, e)
-    }
-    // `export config` doesn't exist, or other unknown error thrown by swc, silence them
+  const configResult = extractExportedConstValue(ast, 'config')
+  if (configResult !== null && 'unsupported' in configResult) {
+    warnAboutUnsupportedValue(pageFilePath, page, configResult)
+  } else if (configResult !== null) {
+    exportedConfig.config = configResult.value
   }
 
   const route = normalizeAppPath(page)
@@ -681,14 +695,33 @@ export async function getAppPageStaticInfo({
     )
   }
 
-  if (
-    'unstable_prefetch' in config &&
-    (!nextConfig.cacheComponents ||
-      // don't allow in `clientSegmentCache: 'client-only'` mode
-      nextConfig.experimental?.clientSegmentCache !== true)
-  ) {
+  // Prevent use client and unstable_instant in the same file.
+  if (directives?.has('client') && 'unstable_instant' in config) {
     throw new Error(
-      `Page "${page}" cannot use \`export const unstable_prefetch = ...\` without enabling \`cacheComponents\` and \`experimental.clientSegmentCache\`.`
+      `Page "${page}" cannot export "unstable_instant" from a Client Component module. To use this API, convert this module to a Server Component by removing the "use client" directive.`
+    )
+  }
+
+  if ('unstable_instant' in config && !nextConfig.cacheComponents) {
+    throw new Error(
+      `Page "${page}" cannot use \`export const unstable_instant = ...\` without enabling \`cacheComponents\`.`
+    )
+  }
+
+  // Prevent unstable_dynamicStaleTime in layouts.
+  if ('unstable_dynamicStaleTime' in config) {
+    const isLayout = /\/layout\.[^/]+$/.test(pageFilePath)
+    if (isLayout) {
+      throw new Error(
+        `"${page}" cannot use \`export const unstable_dynamicStaleTime\`. This config is only supported in page files, not layouts.`
+      )
+    }
+  }
+
+  // Prevent combining unstable_dynamicStaleTime and unstable_instant.
+  if ('unstable_dynamicStaleTime' in config && 'unstable_instant' in config) {
+    throw new Error(
+      `Page "${page}" cannot use both \`export const unstable_dynamicStaleTime\` and \`export const unstable_instant\`.`
     )
   }
 
@@ -713,7 +746,7 @@ export async function getPagesPageStaticInfo({
   isDev,
   page,
 }: GetPageStaticInfoParams): Promise<PagesPageStaticInfo> {
-  const content = await tryToReadFile(pageFilePath, !isDev)
+  const content = tryToReadFile(pageFilePath, !isDev)
   if (!content || !PARSE_PATTERN.test(content)) {
     return {
       type: PAGE_TYPES.PAGES,
@@ -744,23 +777,20 @@ export async function getPagesPageStaticInfo({
   const exportedConfig: Record<string, unknown> = {}
   if (exports) {
     for (const property of exports) {
-      try {
-        exportedConfig[property] = extractExportedConstValue(ast, property)
-      } catch (e) {
-        if (e instanceof UnsupportedValueError) {
-          warnAboutUnsupportedValue(pageFilePath, page, e)
-        }
+      const result = extractExportedConstValue(ast, property)
+      if (result !== null && 'unsupported' in result) {
+        warnAboutUnsupportedValue(pageFilePath, page, result)
+      } else if (result !== null) {
+        exportedConfig[property] = result.value
       }
     }
   }
 
-  try {
-    exportedConfig.config = extractExportedConstValue(ast, 'config')
-  } catch (e) {
-    if (e instanceof UnsupportedValueError) {
-      warnAboutUnsupportedValue(pageFilePath, page, e)
-    }
-    // `export config` doesn't exist, or other unknown error thrown by swc, silence them
+  const configResult = extractExportedConstValue(ast, 'config')
+  if (configResult !== null && 'unsupported' in configResult) {
+    warnAboutUnsupportedValue(pageFilePath, page, configResult)
+  } else if (configResult !== null) {
+    exportedConfig.config = configResult.value
   }
 
   // Validate the config.

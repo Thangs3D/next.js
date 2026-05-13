@@ -10,17 +10,14 @@ import {
   NEXT_REWRITTEN_QUERY_HEADER,
   NEXT_RSC_UNION_QUERY,
 } from './components/app-router-headers'
-import type { NormalizedSearch } from './components/segment-cache'
+import type {
+  NormalizedPathname,
+  NormalizedSearch,
+} from './components/segment-cache/cache-key'
 import type { RSCResponse } from './components/router-reducer/fetch-server-response'
 import type { ParsedUrlQuery } from 'querystring'
 
 export type RouteParamValue = string | Array<string> | null
-
-export type RouteParam = {
-  name: string
-  value: RouteParamValue
-  type: DynamicParamTypesShort
-}
 
 export function getRenderedSearch(
   response: RSCResponse<unknown> | Response
@@ -42,14 +39,32 @@ export function getRenderedSearch(
 
 export function getRenderedPathname(
   response: RSCResponse<unknown> | Response
-): string {
+): NormalizedPathname {
   // If the server performed a rewrite, the pathname used to render the
   // page will be different from the pathname in the request URL. In this case,
   // the response will include a header that gives the rewritten pathname.
   const rewrittenPath = response.headers.get(NEXT_REWRITTEN_PATH_HEADER)
-  return (
-    rewrittenPath ?? urlToUrlWithoutFlightMarker(new URL(response.url)).pathname
-  )
+  return (rewrittenPath ??
+    urlToUrlWithoutFlightMarker(new URL(response.url))
+      .pathname) as NormalizedPathname
+}
+
+// Pathname parts come from `URL.pathname.split('/')`, so they are already
+// in the encoded form the URL parser produces. The server-side equivalent
+// (`get-dynamic-param.ts`) starts from a decoded param value and applies
+// `encodeURIComponent` once. The two encodings are not the same — for
+// example, the URL parser leaves `,` and `:` untouched while
+// `encodeURIComponent` percent-encodes them. To produce the same canonical
+// form on the client (and avoid double-encoding `%xx` sequences such as
+// `%2F` → `%252F`), we decode the URL part first and re-encode it.
+function canonicalizeURLPart(part: string): string {
+  try {
+    return encodeURIComponent(decodeURIComponent(part))
+  } catch {
+    // `decodeURIComponent` throws on malformed sequences. Fall back to the
+    // already-encoded form rather than failing the navigation.
+    return part
+  }
 }
 
 export function parseDynamicParamFromURLPart(
@@ -60,12 +75,27 @@ export function parseDynamicParamFromURLPart(
   // This needs to match the behavior in get-dynamic-param.ts.
   switch (paramType) {
     // Catchalls
-    case 'c':
-    case 'ci': {
+    case 'c': {
       // Catchalls receive all the remaining URL parts. If there are no
       // remaining pathname parts, return an empty array.
       return partIndex < pathnameParts.length
-        ? pathnameParts.slice(partIndex).map((s) => encodeURIComponent(s))
+        ? pathnameParts.slice(partIndex).map((s) => canonicalizeURLPart(s))
+        : []
+    }
+    // Catchall intercepted
+    case 'ci(..)(..)':
+    case 'ci(.)':
+    case 'ci(..)':
+    case 'ci(...)': {
+      const prefix = paramType.length - 2
+      return partIndex < pathnameParts.length
+        ? pathnameParts.slice(partIndex).map((s, i) => {
+            if (i === 0) {
+              return canonicalizeURLPart(s.slice(prefix))
+            }
+
+            return canonicalizeURLPart(s)
+          })
         : []
     }
     // Optional catchalls
@@ -73,12 +103,11 @@ export function parseDynamicParamFromURLPart(
       // Optional catchalls receive all the remaining URL parts, unless this is
       // the end of the pathname, in which case they return null.
       return partIndex < pathnameParts.length
-        ? pathnameParts.slice(partIndex).map((s) => encodeURIComponent(s))
+        ? pathnameParts.slice(partIndex).map((s) => canonicalizeURLPart(s))
         : null
     }
     // Dynamic
-    case 'd':
-    case 'di': {
+    case 'd': {
       if (partIndex >= pathnameParts.length) {
         // The route tree expected there to be more parts in the URL than there
         // actually are. This could happen if the x-nextjs-rewritten-path header
@@ -89,7 +118,26 @@ export function parseDynamicParamFromURLPart(
         // recovery options.
         return ''
       }
-      return encodeURIComponent(pathnameParts[partIndex])
+      return canonicalizeURLPart(pathnameParts[partIndex])
+    }
+    // Dynamic intercepted
+    case 'di(..)(..)':
+    case 'di(.)':
+    case 'di(..)':
+    case 'di(...)': {
+      const prefix = paramType.length - 2
+      if (partIndex >= pathnameParts.length) {
+        // The route tree expected there to be more parts in the URL than there
+        // actually are. This could happen if the x-nextjs-rewritten-path header
+        // is incorrectly set, or potentially due to bug in Next.js. TODO:
+        // Should this be a hard error? During a prefetch, we can just abort.
+        // During a client navigation, we could trigger a hard refresh. But if
+        // it happens during initial render, we don't really have any
+        // recovery options.
+        return ''
+      }
+
+      return canonicalizeURLPart(pathnameParts[partIndex].slice(prefix))
     }
     default:
       paramType satisfies never

@@ -61,9 +61,10 @@ jobs:
             echo "  - 📦 This will PUBLISH packages to npm"
           fi
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
 
       - name: Enable corepack
         run: corepack enable
@@ -79,9 +80,8 @@ jobs:
         uses: actions/cache@v3
         with:
           path: ~/.pnpm-store
-          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-pnpm-
+          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-v2-${{ hashFiles('**/pnpm-lock.yaml') }}
+          # Do not use restore-keys since it leads to indefinite growth of the cache.
 
       - name: Install dependencies
         run: pnpm install
@@ -113,12 +113,6 @@ jobs:
       - name: List npm dirs
         run: ls -R npm
         working-directory: ${{ steps.napi-info.outputs.binding-directory }}
-
-      - name: Create npm token
-        run: |
-          echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" >> ~/.npmrc
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN_ELEVATED }}
 
       - name: Release npm binding packages
         run: |

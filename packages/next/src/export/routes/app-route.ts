@@ -49,7 +49,8 @@ export async function exportAppRoute(
   fileWriter: MultiFileWriter,
   cacheComponents: boolean,
   experimental: Required<Pick<ExperimentalConfig, 'authInterrupts'>>,
-  buildId: string
+  buildId: string,
+  deploymentId: string
 ): Promise<ExportRouteResult> {
   // Ensure that the URL is absolute.
   req.url = `http://localhost:3000${req.url}`
@@ -66,21 +67,15 @@ export async function exportAppRoute(
   // the route and the context for the request.
   const context: AppRouteRouteHandlerContext = {
     params,
-    prerenderManifest: {
-      version: 4,
-      routes: {},
-      dynamicRoutes: {},
-      preview: {
-        previewModeEncryptionKey: '',
-        previewModeId: '',
-        previewModeSigningKey: '',
-      },
-      notFoundRoutes: [],
+    previewProps: {
+      previewModeEncryptionKey: '',
+      previewModeId: '',
+      previewModeSigningKey: '',
     },
     renderOpts: {
       cacheComponents,
       experimental,
-      nextExport: true,
+      isBuildTimePrerendering: true,
       supportsDynamicResponse: false,
       incrementalCache,
       waitUntil: afterRunner.context.waitUntil,
@@ -90,6 +85,7 @@ export async function exportAppRoute(
     },
     sharedContext: {
       buildId,
+      deploymentId,
     },
   }
 

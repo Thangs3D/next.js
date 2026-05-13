@@ -1,4 +1,12 @@
 import type { NextConfigComplete } from '../config-shared'
+import type {
+  AppPageModule,
+  AppPageRouteModule,
+} from '../route-modules/app-page/module'
+import type {
+  AppRouteModule,
+  AppRouteRouteModule,
+} from '../route-modules/app-route/module.compiled'
 
 import '../require-hook'
 import '../node-environment'
@@ -18,11 +26,11 @@ import { collectRootParamKeys } from '../../build/segment-config/app/collect-roo
 import { buildAppStaticPaths } from '../../build/static-paths/app'
 import { buildPagesStaticPaths } from '../../build/static-paths/pages'
 import { createIncrementalCache } from '../../export/helpers/create-incremental-cache'
-import type { AppPageRouteModule } from '../route-modules/app-page/module'
-import type { AppRouteRouteModule } from '../route-modules/app-route/module'
+import { parseAppRoute } from '../../shared/lib/router/routes/app'
 
 type RuntimeConfig = {
   pprConfig: ExperimentalPPRConfig | undefined
+  partialFallbacks: boolean
   configFileName: string
   cacheComponents: boolean
 }
@@ -49,6 +57,7 @@ export async function loadStaticPaths({
   cacheLifeProfiles,
   nextConfigOutput,
   buildId,
+  deploymentId,
   authInterrupts,
   sriEnabled,
 }: {
@@ -72,6 +81,7 @@ export async function loadStaticPaths({
   }
   nextConfigOutput: 'standalone' | 'export' | undefined
   buildId: string
+  deploymentId: string
   authInterrupts: boolean
   sriEnabled: boolean
 }): Promise<StaticPathsResult> {
@@ -93,7 +103,7 @@ export async function loadStaticPaths({
     httpAgentOptions,
   })
 
-  const components = await loadComponents({
+  const components = await loadComponents<AppPageModule | AppRouteModule>({
     distDir,
     // In `pages/`, the page is the same as the pathname.
     page: page || pathname,
@@ -111,6 +121,13 @@ export async function loadStaticPaths({
       routeModule as AppPageRouteModule | AppRouteRouteModule
     )
 
+    const route = parseAppRoute(pathname, true)
+    if (route.dynamicSegments.length === 0) {
+      throw new InvariantError(
+        `Expected a dynamic route, but got a static route: ${pathname}`
+      )
+    }
+
     const isRoutePPREnabled =
       isAppPageRouteModule(routeModule) &&
       checkIsRoutePPREnabled(config.pprConfig)
@@ -120,6 +137,7 @@ export async function loadStaticPaths({
     return buildAppStaticPaths({
       dir,
       page: pathname,
+      route,
       cacheComponents: config.cacheComponents,
       segments,
       distDir,
@@ -132,7 +150,9 @@ export async function loadStaticPaths({
       ComponentMod: components.ComponentMod,
       nextConfigOutput,
       isRoutePPREnabled,
+      partialFallbacksEnabled: config.partialFallbacks,
       buildId,
+      deploymentId,
       authInterrupts,
       rootParamKeys,
     })
