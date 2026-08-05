@@ -1,6 +1,5 @@
 import { check, retry } from 'next-test-utils'
-import type { Playwright } from 'next-webdriver'
-import { FileRef, nextTestSetup } from 'e2e-utils'
+import { FileRef, nextTestSetup, type Playwright } from 'e2e-utils'
 import path from 'path'
 import { createSandbox } from 'development-sandbox'
 import { outdent } from 'outdent'
@@ -86,7 +85,7 @@ describe('Error overlay - editor links', () => {
       expect(loaded).toBe(true)
     })
 
-    await session.assertHasRedbox()
+    await session.waitForRedbox()
     await clickSourceFile(browser)
     await check(() => editorRequestsCount, /1/)
   })
@@ -129,7 +128,7 @@ describe('Error overlay - editor links', () => {
       `
         )
 
-        await session.assertHasRedbox()
+        await session.waitForRedbox()
         await clickImportTraceFiles(browser)
         await check(() => editorRequestsCount, /4/)
       })
@@ -170,9 +169,12 @@ describe('Error overlay - editor links', () => {
       `
         )
 
-        await session.assertHasRedbox()
+        await session.waitForRedbox()
         await clickImportTraceFiles(browser)
-        await check(() => editorRequestsCount, /3/)
+        await check(
+          () => editorRequestsCount,
+          process.env.NEXT_RSPACK ? /4/ : /3/
+        )
       })
     }
   )

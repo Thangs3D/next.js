@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Result, bail};
 use turbo_rcstr::{RcStr, rcstr};
 use turbo_tasks::{ResolvedVc, TryFlatJoinIterExt, TryJoinIterExt, Vc};
 use turbo_tasks_env::ProcessEnv;
@@ -6,14 +6,20 @@ use turbo_tasks_fs::FileSystemPath;
 use turbopack_browser::{BrowserChunkingContext, react_refresh::assert_can_resolve_react_refresh};
 use turbopack_cli_utils::runtime_entry::{RuntimeEntries, RuntimeEntry};
 use turbopack_core::{
-    chunk::{ChunkableModule, ChunkingContext, EvaluatableAsset, SourceMapsType},
+    chunk::{
+        ChunkableModule, ChunkingContext, EvaluatableAsset, SourceMapSourceType, SourceMapsType,
+    },
+    context::AssetContext,
     environment::Environment,
     file_source::FileSource,
     module::Module,
-    module_graph::{ModuleGraph, chunk_group_info::ChunkGroupEntry},
+    module_graph::{
+        GraphEntries, ModuleGraph, SingleModuleGraph,
+        chunk_group_info::{ChunkGroupEntry, EntryHeuristics},
+    },
     reference_type::{EntryReferenceSubType, ReferenceType},
     resolve::{
-        origin::{PlainResolveOrigin, ResolveOriginExt},
+        origin::{PlainResolveOrigin, ResolveOrigin},
         parse::Request,
     },
 };
@@ -51,8 +57,9 @@ pub async fn get_client_chunking_context(
             RuntimeType::Development,
         )
         .hot_module_replacement()
-        .use_file_source_map_uris()
+        .source_map_source_type(SourceMapSourceType::AbsoluteFileUri)
         .dynamic_chunk_content_loading(true)
+        .nested_async_availability(true)
         .build(),
     ))
 }
@@ -110,7 +117,7 @@ pub async fn create_web_entry_source(
     source_maps_type: SourceMapsType,
     browserslist_query: RcStr,
 ) -> Result<Vc<Box<dyn ContentSource>>> {
-    let compile_time_info = get_client_compile_time_info(browserslist_query, node_env);
+    let compile_time_info = get_client_compile_time_info(browserslist_query, node_env, true);
     let asset_context = get_client_asset_context(
         root_path.clone(),
         execution_context,
@@ -130,20 +137,22 @@ pub async fn create_web_entry_source(
 
     let runtime_entries = entries.resolve_entries(asset_context);
 
-    let origin = PlainResolveOrigin::new(asset_context, root_path.join("_")?);
+    let origin = PlainResolveOrigin::new(asset_context, root_path.join("_")?).await?;
+    let resolve_options = origin.resolve_options();
+    let asset_context = origin.asset_context();
+    let origin_path = origin.origin_path();
     let entries = entry_requests
         .into_iter()
-        .map(|request| async move {
-            let ty = ReferenceType::Entry(EntryReferenceSubType::Web);
-            Ok(origin
-                .resolve_asset(request, origin.resolve_options(ty.clone()).await?, ty)
-                .await?
-                .resolve()
-                .await?
-                .primary_modules()
-                .await?
-                .first()
-                .copied())
+        .map(|request| {
+            let origin_path = origin_path.clone();
+            async move {
+                let ty = ReferenceType::Entry(EntryReferenceSubType::Web);
+                asset_context
+                    .resolve_asset(origin_path, request, resolve_options, ty)
+                    .await?
+                    .first_module()
+                    .await
+            }
         })
         .try_flat_join()
         .await?;
@@ -158,10 +167,19 @@ pub async fn create_web_entry_source(
                 .map(|&entry| ResolvedVc::upcast(entry)),
         )
         .collect::<Vec<ResolvedVc<Box<dyn Module>>>>();
-    let module_graph =
-        ModuleGraph::from_modules(Vc::cell(vec![ChunkGroupEntry::Entry(all_modules)]), false)
-            .to_resolved()
-            .await?;
+    let module_graph = ModuleGraph::from_graphs(
+        vec![SingleModuleGraph::new_with_entries(
+            GraphEntries::from_chunk_groups(vec![ChunkGroupEntry::Entry {
+                modules: all_modules,
+                heuristics: EntryHeuristics::default(),
+            }])
+            .resolved_cell(),
+            false,
+            false,
+        )],
+        None,
+    );
+    let module_graph = module_graph.connect().to_resolved().await?;
 
     let entries: Vec<_> = entries
         .into_iter()
@@ -189,10 +207,10 @@ pub async fn create_web_entry_source(
                 })
             } else {
                 // TODO convert into a serve-able asset
-                Err(anyhow!(
+                bail!(
                     "Entry module is not chunkable, so it can't be used to bootstrap the \
                      application"
-                ))
+                )
             }
         })
         .try_join()

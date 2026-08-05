@@ -1,7 +1,7 @@
 /* eslint-env jest */
 
 import { isNextStart, nextTestSetup } from 'e2e-utils'
-import { assertHasRedbox, getRedboxSource } from 'next-test-utils'
+import { waitForRedbox, getRedboxSource } from 'next-test-utils'
 
 describe('Valid and Invalid Global CSS with Custom App', () => {
   const { next, skipped, isTurbopack, isRspack } = nextTestSetup({
@@ -19,7 +19,9 @@ describe('Valid and Invalid Global CSS with Custom App', () => {
     it('should fail to build', async () => {
       const { exitCode, cliOutput } = await next.build()
       expect(exitCode).not.toBe(0)
-      expect(cliOutput).toContain('Failed to compile')
+      if (!isTurbopack) {
+        expect(cliOutput).toContain('Failed to compile')
+      }
       expect(cliOutput).toContain('styles/global.scss')
       expect(cliOutput).toContain(
         'Please move all first-party global CSS imports'
@@ -33,17 +35,18 @@ describe('Valid and Invalid Global CSS with Custom App', () => {
     it('should show a build error', async () => {
       const browser = await next.browser('/')
 
-      await assertHasRedbox(browser)
+      await waitForRedbox(browser)
       const errorSource = await getRedboxSource(browser)
 
       if (isTurbopack) {
         expect(errorSource).toMatchInlineSnapshot(`
          "./pages/index.js
-         Failed to compile
-             Global CSS cannot be imported from files other than your Custom <App>. Due to the Global nature of stylesheets, and to avoid conflicts, Please move all first-party global CSS imports to pages/_app.js. Or convert the import to Component-Level CSS (CSS Modules).
-             Read more: https://nextjs.org/docs/messages/css-global
+         Error: Global CSS cannot be imported from files other than your Custom <App>.
+         Due to the Global nature of stylesheets, and to avoid conflicts, Please move all first-party global CSS imports to pages/_app.js. Or convert the import to Component-Level CSS (CSS Modules).
          Location: pages/index.js
-         Import path: ../styles/global.scss"
+         Import path: ../styles/global.scss
+
+         https://nextjs.org/docs/messages/css-global"
         `)
       } else if (isRspack) {
         expect(errorSource).toMatchInlineSnapshot(`

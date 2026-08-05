@@ -17,7 +17,6 @@ import {
   NEXT_CACHE_TAGS_HEADER,
   NEXT_DATA_SUFFIX,
   NEXT_META_SUFFIX,
-  RSC_PREFETCH_SUFFIX,
   RSC_SEGMENT_SUFFIX,
   RSC_SEGMENTS_DIR_SUFFIX,
   RSC_SUFFIX,
@@ -231,10 +230,13 @@ export default class FileSystemCache implements CacheHandler {
             }
 
             let rscData: Buffer | undefined
-            if (!ctx.isFallback) {
+            if (
+              !ctx.isFallback &&
+              (!ctx.isRoutePPREnabled || meta?.postponed == null)
+            ) {
               rscData = await this.fs.readFile(
                 this.getFilePath(
-                  `${key}${ctx.isRoutePPREnabled ? RSC_PREFETCH_SUFFIX : RSC_SUFFIX}`,
+                  `${key}${RSC_SUFFIX}`,
                   IncrementalCacheKind.APP_PAGE
                 )
               )
@@ -387,6 +389,7 @@ export default class FileSystemCache implements CacheHandler {
         status: data.status,
         postponed: undefined,
         segmentPaths: undefined,
+        prefetchHints: undefined,
       }
 
       writer.append(
@@ -403,62 +406,50 @@ export default class FileSystemCache implements CacheHandler {
         isAppPath ? IncrementalCacheKind.APP_PAGE : IncrementalCacheKind.PAGES
       )
 
-      // Delete existing data if page now has restricted access
-      // @ts-ignore-next-line
-      if (!isAppPath && data.pageData?.pageProps?.forbidden) {
-        if (this.fs.existsSync(htmlPath)) {
-          await this.fs.unlink(htmlPath)
-        }
-      } else {
-        writer.append(htmlPath, data.html)
-        // Fallbacks don't generate a data file.
-        if (!ctx.fetchCache && !ctx.isFallback) {
-          writer.append(
-            this.getFilePath(
-              `${key}${
-                isAppPath
-                  ? ctx.isRoutePPREnabled
-                    ? RSC_PREFETCH_SUFFIX
-                    : RSC_SUFFIX
-                  : NEXT_DATA_SUFFIX
-              }`,
-              isAppPath
-                ? IncrementalCacheKind.APP_PAGE
-                : IncrementalCacheKind.PAGES
-            ),
-            isAppPath ? data.rscData! : JSON.stringify(data.pageData)
+      writer.append(htmlPath, data.html)
+
+      // Fallbacks don't generate a data file.
+      if (!ctx.fetchCache && !ctx.isFallback && !ctx.isRoutePPREnabled) {
+        writer.append(
+          this.getFilePath(
+            `${key}${isAppPath ? RSC_SUFFIX : NEXT_DATA_SUFFIX}`,
+            isAppPath
+              ? IncrementalCacheKind.APP_PAGE
+              : IncrementalCacheKind.PAGES
+          ),
+          isAppPath ? data.rscData! : JSON.stringify(data.pageData)
+        )
+      }
+
+      if (data?.kind === CachedRouteKind.APP_PAGE) {
+        let segmentPaths: string[] | undefined
+        if (data.segmentData) {
+          segmentPaths = []
+          const segmentsDir = htmlPath.replace(
+            /\.html$/,
+            RSC_SEGMENTS_DIR_SUFFIX
           )
+
+          for (const [segmentPath, buffer] of data.segmentData) {
+            segmentPaths.push(segmentPath)
+            const segmentDataFilePath =
+              segmentsDir + segmentPath + RSC_SEGMENT_SUFFIX
+            writer.append(segmentDataFilePath, buffer)
+          }
         }
 
-        if (data?.kind === CachedRouteKind.APP_PAGE) {
-          let segmentPaths: string[] | undefined
-          if (data.segmentData) {
-            segmentPaths = []
-            const segmentsDir = htmlPath.replace(
-              /\.html$/,
-              RSC_SEGMENTS_DIR_SUFFIX
-            )
-
-            for (const [segmentPath, buffer] of data.segmentData) {
-              segmentPaths.push(segmentPath)
-              const segmentDataFilePath =
-                segmentsDir + segmentPath + RSC_SEGMENT_SUFFIX
-              writer.append(segmentDataFilePath, buffer)
-            }
-          }
-
-          const meta: RouteMetadata = {
-            headers: data.headers,
-            status: data.status,
-            postponed: data.postponed,
-            segmentPaths,
-          }
-
-          writer.append(
-            htmlPath.replace(/\.html$/, NEXT_META_SUFFIX),
-            JSON.stringify(meta)
-          )
+        const meta: RouteMetadata = {
+          headers: data.headers,
+          status: data.status,
+          postponed: data.postponed,
+          segmentPaths,
+          prefetchHints: undefined,
         }
+
+        writer.append(
+          htmlPath.replace(/\.html$/, NEXT_META_SUFFIX),
+          JSON.stringify(meta)
+        )
       }
     } else if (data.kind === CachedRouteKind.FETCH) {
       const filePath = this.getFilePath(key, IncrementalCacheKind.FETCH)
