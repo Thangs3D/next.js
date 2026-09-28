@@ -3,6 +3,7 @@ import type {
   FlightRouterState,
   FlightSegmentPath,
   ScrollRef,
+  Segment,
 } from '../../../shared/lib/app-router-types'
 import type { CacheNode } from '../../../shared/lib/app-router-types'
 import type { HeadData } from '../../../shared/lib/app-router-types'
@@ -25,6 +26,8 @@ import { createHrefFromUrl } from '../router-reducer/create-href-from-url'
 import { NEXT_NAV_DEPLOYMENT_ID_HEADER } from '../../../lib/constants'
 import {
   EntryStatus,
+  segmentCacheMap,
+  type SegmentCacheEntry,
   readRouteCacheEntry,
   deprecated_requestOptimisticRouteCacheEntry,
   convertRootFlightRouterStateToRouteTree,
@@ -37,6 +40,7 @@ import {
 } from './cache'
 import { discoverKnownRoute } from './optimistic-routes'
 import { createCacheKey, type NormalizedSearch } from './cache-key'
+import type { CacheMap } from './cache-map'
 import { schedulePrefetchTask } from './scheduler'
 import { PrefetchPriority, FetchStrategy } from './types'
 import { getLinkForCurrentNavigation } from '../links'
@@ -47,6 +51,11 @@ import { computeChangedPath } from '../router-reducer/compute-changed-path'
 import { isJavaScriptURLString } from '../../lib/javascript-url'
 import { UnknownDynamicStaleTime, computeDynamicStaleAt } from './bfcache'
 import { createLinkPrefetchPartialError } from '../../../shared/lib/instant-messages'
+import { matchSegment } from '../match-segments'
+import {
+  DEFAULT_SEGMENT_KEY,
+  PAGE_SEGMENT_KEY,
+} from '../../../shared/lib/segment'
 
 /**
  * Navigate to a new URL, using the Segment Cache to construct a response.
@@ -112,7 +121,9 @@ export function navigate(
     freshnessPolicy,
     scrollBehavior,
     navigateType,
-    navigationLock
+    navigationLock,
+    // An unlocked navigation is bound to the shared map.
+    segmentCacheMap
   )
 }
 
@@ -127,7 +138,10 @@ function navigateImpl(
   freshnessPolicy: FreshnessPolicy,
   scrollBehavior: ScrollBehavior,
   navigateType: 'push' | 'replace',
-  navigationLock: NavigationLock | null
+  navigationLock: NavigationLock | null,
+  // The segment cache map this navigation is bound to: a locked navigation's
+  // driving-task map, or the shared map. See `segmentCacheMap` in cache.ts.
+  map: CacheMap<SegmentCacheEntry>
 ): AppRouterState | Promise<AppRouterState> {
   const now = Date.now()
   const href = url.href
@@ -149,7 +163,8 @@ function navigateImpl(
       scrollBehavior,
       navigateType,
       route,
-      navigationLock
+      navigationLock,
+      map
     )
   }
 
@@ -186,7 +201,8 @@ function navigateImpl(
           scrollBehavior,
           navigateType,
           optimisticRoute,
-          navigationLock
+          navigationLock,
+          map
         )
       }
     }
@@ -209,7 +225,8 @@ function navigateImpl(
     freshnessPolicy,
     scrollBehavior,
     navigateType,
-    navigationLock
+    navigationLock,
+    map
   ).catch(() => {
     // If the navigation fails, return the current state
     return state
@@ -231,6 +248,9 @@ export function navigateToKnownRoute(
   scrollBehavior: ScrollBehavior,
   navigateType: 'push' | 'replace',
   navigationLock: NavigationLock | null,
+  // The segment cache map this navigation is bound to: a locked navigation's
+  // driving-task map, or the shared map. See `segmentCacheMap` in cache.ts.
+  map: CacheMap<SegmentCacheEntry>,
   debugInfo: Array<unknown> | null,
   // The route cache entry used for this navigation, if it came from route
   // prediction. Passed through so it can be marked as having a dynamic rewrite
@@ -345,6 +365,7 @@ export function navigateToKnownRoute(
     navigationSeed.dynamicStaleAt,
     isSamePageNavigation,
     accumulation,
+    map,
     restrictToShell
   )
   if (task !== null) {
@@ -358,6 +379,7 @@ export function navigateToKnownRoute(
         routeCacheEntry,
         navigateType,
         navigationLock,
+        map,
         signal
       )
     }
@@ -392,7 +414,8 @@ function navigateUsingPrefetchedRouteTree(
   scrollBehavior: ScrollBehavior,
   navigateType: 'push' | 'replace',
   route: FulfilledRouteCacheEntry,
-  navigationLock: NavigationLock | null
+  navigationLock: NavigationLock | null,
+  map: CacheMap<SegmentCacheEntry>
 ): AppRouterState {
   const routeTree = route.tree
   const canonicalUrl = route.canonicalUrl + url.hash
@@ -404,6 +427,8 @@ function navigateUsingPrefetchedRouteTree(
     data: null,
     head: null,
     dynamicStaleAt: computeDynamicStaleAt(now, UnknownDynamicStaleTime),
+    // Not derived from a server response; no base to diverge from.
+    treeDivergedFromBase: false,
   }
   return navigateToKnownRoute(
     now,
@@ -420,6 +445,7 @@ function navigateUsingPrefetchedRouteTree(
     scrollBehavior,
     navigateType,
     navigationLock,
+    map,
     null,
     route,
     // Not an HMR refresh, so there's no request generation to cancel.
@@ -451,7 +477,8 @@ async function navigateToUnknownRoute(
   freshnessPolicy: FreshnessPolicy,
   scrollBehavior: ScrollBehavior,
   navigateType: 'push' | 'replace',
-  navigationLock: NavigationLock | null
+  navigationLock: NavigationLock | null,
+  map: CacheMap<SegmentCacheEntry>
 ): Promise<AppRouterState> {
   // Runs when a navigation happens but there's no cached prefetch we can use.
   // Don't bother to wait for a prefetch response; go straight to a full
@@ -567,7 +594,8 @@ async function navigateToUnknownRoute(
             staleAt,
             currentFlightRouterState,
             renderedSearch,
-            isResponsePartial
+            isResponsePartial,
+            map
           )
         })
         .catch(() => {
@@ -595,7 +623,8 @@ async function navigateToUnknownRoute(
               processed.rootVaryParamsIterable,
               processed.staleAt,
               processed.navigationSeed,
-              null
+              null,
+              map
             )
           }
         })
@@ -636,6 +665,7 @@ async function navigateToUnknownRoute(
     scrollBehavior,
     navigateType,
     navigationLock,
+    map,
     debugInfo,
     // Unknown route navigations don't use route prediction - the route tree
     // came directly from the server. If a mismatch occurs during dynamic data
@@ -862,6 +892,16 @@ export type NavigationSeed = {
   data: CacheNodeSeedData | null
   head: HeadData | null
   dynamicStaleAt: number
+  // Whether the response rendered a segment whose identity differs from the
+  // base tree's at the same position (inactive parallel route branches are
+  // expected to differ and don't count). Only meaningful when the base is a
+  // request tree derived from a cached route entry, as during a prefetch:
+  // divergence then means the entry doesn't describe what the server renders
+  // — the URL has a rewrite that behaves dynamically (see
+  // fetchSegmentPrefetchesUsingDynamicRequest). During a navigation the base
+  // is the current page's tree, so divergence carries no signal. False when
+  // there was no base to compare against.
+  treeDivergedFromBase: boolean
 }
 
 export function convertServerPatchToFullTree(
@@ -890,6 +930,11 @@ export function convertServerPatchToFullTree(
   let baseTree: FlightRouterState = currentTree
   let baseData: CacheNodeSeedData | null = null
   let head: HeadData | null = null
+  // Whether any patch rendered a segment whose identity differs from the base
+  // (request) tree at the same position. See NavigationSeed.treeDivergedFromBase.
+  // Compared against the original `currentTree`, not the progressively-merged
+  // `baseTree`, so each patch is checked against what was actually requested.
+  let treeDivergedFromBase = false
   if (flightData !== null) {
     for (const {
       segmentPath,
@@ -897,6 +942,13 @@ export function convertServerPatchToFullTree(
       seedData: dataPatch,
       head: headPatch,
     } of flightData) {
+      if (!treeDivergedFromBase) {
+        treeDivergedFromBase = didServerPatchDivergeFromBase(
+          currentTree,
+          segmentPath,
+          treePatch
+        )
+      }
       const result = convertServerPatchToFullTreeImpl(
         baseTree,
         baseData,
@@ -921,7 +973,7 @@ export function convertServerPatchToFullTree(
   // TODO: Eventually, FlightRouterState will evolve to being a transport format
   // only. The RouteTree type will become the main type used for dealing with
   // routes on the client, and we'll store it in the state directly.
-  const acc = { metadataVaryPath: null }
+  const acc = { metadataVaryPath: null, treeDivergedFromBase: false }
   const routeTree = convertRootFlightRouterStateToRouteTree(
     finalFlightRouterState,
     renderedSearch as NormalizedSearch,
@@ -935,7 +987,97 @@ export function convertServerPatchToFullTree(
     renderedSearch,
     head,
     dynamicStaleAt: computeDynamicStaleAt(now, dynamicStaleTimeSeconds),
+    treeDivergedFromBase,
   }
+}
+
+// Whether a server patch's rendered tree diverges in segment identity from the
+// base (request) tree it was applied to. Mirrors the comparison performed while
+// decoding a server response in newer versions of the client (see
+// NavigationSeed.treeDivergedFromBase). Divergence means the server rendered a
+// different route than the one we requested — e.g. a URL rewrite that behaves
+// dynamically — so a prefetch built from the base tree can never be fulfilled.
+//
+// The base-tree descent mirrors convertServerPatchToFullTreeImpl: segmentPath
+// is a repeating [parallelRouteKey, segment, ...] pattern; segmentPath[i] keys
+// into the children, segmentPath[i + 1] is the server's segment at that
+// position.
+function didServerPatchDivergeFromBase(
+  currentTree: FlightRouterState,
+  segmentPath: FlightSegmentPath,
+  treePatch: FlightRouterState
+): boolean {
+  let baseNode: FlightRouterState = currentTree
+  for (let i = 0; i + 1 < segmentPath.length; i += 2) {
+    const parallelRouteKey: string = segmentPath[i]
+    const serverSegment: Segment = segmentPath[i + 1]
+    const childBase: FlightRouterState | undefined =
+      baseNode[1][parallelRouteKey]
+    if (childBase === undefined) {
+      // The base tree doesn't have this branch. Unless the server merely
+      // filled it with a default, the trees have different structures.
+      return serverSegment !== DEFAULT_SEGMENT_KEY
+    }
+    if (segmentIdentityDivergesFromBase(serverSegment, childBase[0])) {
+      return true
+    }
+    baseNode = childBase
+  }
+  return detectTreeDivergenceFromBase(treePatch, baseNode)
+}
+
+// Recursively compares a server-rendered subtree against the base subtree at
+// the same position. Inactive parallel route branches — which carry a refresh
+// state in the base — are expected to differ and are skipped.
+function detectTreeDivergenceFromBase(
+  serverNode: FlightRouterState,
+  baseNode: FlightRouterState
+): boolean {
+  if (segmentIdentityDivergesFromBase(serverNode[0], baseNode[0])) {
+    return true
+  }
+  const serverChildren = serverNode[1]
+  const baseChildren = baseNode[1]
+  for (const parallelRouteKey in serverChildren) {
+    const childServer = serverChildren[parallelRouteKey]
+    const childBase = baseChildren[parallelRouteKey]
+    if (childBase === undefined) {
+      // A slot the base tree doesn't have. Unless the server merely filled it
+      // with a default, the trees have different structures.
+      if (childServer[0] !== DEFAULT_SEGMENT_KEY) {
+        return true
+      }
+    } else if ((childBase[2] ?? null) !== null) {
+      // The base branch carries a refresh state: an inactive parallel route
+      // reused from a different route (e.g. a "default" slot). The server's
+      // answer is expected to differ, so skip the branch.
+    } else if (detectTreeDivergenceFromBase(childServer, childBase)) {
+      return true
+    }
+  }
+  return false
+}
+
+// Whether two segments at the same position claim different identities. Page
+// segments match modulo embedded search params (validated separately, see
+// getRenderedSearch), and a default filled in by the server is not a claim
+// about the position's identity.
+function segmentIdentityDivergesFromBase(
+  serverSegment: Segment,
+  baseSegment: Segment
+): boolean {
+  if (
+    typeof serverSegment === 'string' &&
+    typeof baseSegment === 'string' &&
+    serverSegment.startsWith(PAGE_SEGMENT_KEY) &&
+    baseSegment.startsWith(PAGE_SEGMENT_KEY)
+  ) {
+    return false
+  }
+  if (serverSegment === DEFAULT_SEGMENT_KEY) {
+    return false
+  }
+  return !matchSegment(baseSegment, serverSegment)
 }
 
 function convertServerPatchToFullTreeImpl(
@@ -1085,13 +1227,13 @@ async function ensurePrefetchThenNavigate(
 
   // Create this navigation's "wait for prefetch to fulfill" state and schedule
   // the prefetch as a locked-navigation prefetch. The prefetch's promise
-  // resolves once it has spawned every request and all of them have fulfilled,
-  // so the navigation below reads present data rather than a still-in-flight
-  // entry.
+  // resolves when the task completes — after every segment response the task
+  // cares about has settled — so the navigation below reads present data
+  // rather than a still-in-flight entry.
   const { beginNavigationLockPrefetch } =
     require('./navigation-testing-lock') as typeof import('./navigation-testing-lock')
   const navigationLockPrefetch = beginNavigationLockPrefetch()
-  schedulePrefetchTask(
+  const prefetchTask = schedulePrefetchTask(
     cacheKey,
     currentFlightRouterState,
     fetchStrategy,
@@ -1104,7 +1246,10 @@ async function ensurePrefetchThenNavigate(
   }
 
   // Prefetch is complete. Proceed with the normal navigation flow, which
-  // will now find the route in the cache.
+  // will now find the route in the cache. The navigation inherits the map of
+  // the prefetch task that drives it: the task was scheduled inside the lock
+  // scope, so this is the scope's private map, and the navigation reads only
+  // data fetched under the lock.
   const result = await navigateImpl(
     state,
     url,
@@ -1116,7 +1261,8 @@ async function ensurePrefetchThenNavigate(
     freshnessPolicy,
     scrollBehavior,
     navigateType,
-    navigationLock
+    navigationLock,
+    prefetchTask.segmentCacheMap
   )
 
   // Only transition to captured-SPA once the navigation is known to be an SPA.

@@ -55,7 +55,6 @@ import { defaultOverrides } from '../../server/require-hook'
 import { generateRoutesManifest } from '../generate-routes-manifest'
 import { Bundler } from '../../lib/bundler'
 import { resolveCacheHandlerPathToFilesystem } from '../../lib/format-dynamic-import-path'
-import { isAPIRoute } from '../../lib/is-api-route'
 import { InvariantError } from '../../shared/lib/invariant-error'
 
 interface SharedRouteFields {
@@ -2065,7 +2064,7 @@ export async function handleBuildComplete({
     ]
 
     for (const route of routesManifest.dynamicRoutes) {
-      const shouldLocalize = Boolean(config.i18n) && !isAPIRoute(route.page)
+      const shouldLocalize = Boolean(config.i18n)
 
       const routeRegex = getNamedRouteRegex(route.page, {
         prefixRouteKeys: true,
@@ -2410,7 +2409,7 @@ async function getSharedNodeAssets({
     salt
   )
 
-  // Turbopack handles this automatically and these files are listed in the nft.json files.
+  // Turbopack traces these itself, they are listed in the nft.json files.
   if (bundler !== Bundler.Turbopack) {
     const { nodeFileTrace } =
       require('next/dist/compiled/@vercel/nft') as typeof import('next/dist/compiled/@vercel/nft')
@@ -2443,6 +2442,8 @@ async function getSharedNodeAssets({
       require.resolve('next/dist/server/node-environment'),
       require.resolve('next/dist/server/require-hook'),
       require.resolve('next/dist/server/node-polyfill-crypto'),
+      // Nothing references these, the require hook resolves them at runtime.
+      // Turbopack traces them via `Project::pages_traced_modules`.
       ...Object.values(defaultOverrides).filter((item) => path.extname(item)),
     ]
 
