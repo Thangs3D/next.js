@@ -1,14 +1,14 @@
 import { nextTestSetup, FileRef } from 'e2e-utils'
 import {
-  assertHasRedbox,
-  assertNoRedbox,
+  waitForRedbox,
+  waitForNoRedbox,
   getRedboxCallStack,
   getRedboxSource,
 } from 'next-test-utils'
 import * as path from 'path'
 
 describe('non-root-project-monorepo', () => {
-  const { next, skipped, isTurbopack, isNextDev } = nextTestSetup({
+  const { next, skipped, isTurbopack, isNextDev, isRspack } = nextTestSetup({
     files: {
       apps: new FileRef(path.resolve(__dirname, 'apps')),
       packages: new FileRef(path.resolve(__dirname, 'packages')),
@@ -23,7 +23,6 @@ describe('non-root-project-monorepo', () => {
     installCommand: 'pnpm i',
     skipDeployment: true,
   })
-  const isRspack = !!process.env.NEXT_RSPACK
 
   if (skipped) {
     return
@@ -43,7 +42,7 @@ describe('non-root-project-monorepo', () => {
     it('should work on client-side', async () => {
       const browser = await next.browser('/monorepo-package-ssr')
       expect(await browser.elementByCss('p').text()).toBe('Hello Typescript')
-      await assertNoRedbox(browser)
+      await waitForNoRedbox(browser)
       expect(await browser.elementByCss('p').text()).toBe('Hello Typescript')
       await browser.close()
     })
@@ -66,7 +65,7 @@ describe('non-root-project-monorepo', () => {
 
     it('should work on client-side', async () => {
       const browser = await next.browser('/import-meta-url-ssr')
-      await assertNoRedbox(browser)
+      await waitForNoRedbox(browser)
       if (isTurbopack) {
         // Turbopack intentionally doesn't expose the full path to the browser bundles
         expect(await browser.elementByCss('p').text()).toBe(
@@ -79,13 +78,47 @@ describe('non-root-project-monorepo', () => {
       }
       await browser.close()
     })
+
+    // Verifies that non-URL-safe characters in file paths (here: a literal
+    // space) are correctly percent-encoded in the resulting `file://` URI.
+    describe('non-url-safe characters', () => {
+      it('should encode special chars during RSC', async () => {
+        const $ = await next.render$('/import-meta-url-encoded-rsc')
+        expect($('p').text()).toMatch(
+          /^file:\/\/.*\/next-install-[^/]+\/apps\/web\/app\/import-meta-url-encoded-rsc\/with%20space.ts$/
+        )
+      })
+
+      it('should encode special chars during SSR', async () => {
+        const $ = await next.render$('/import-meta-url-encoded-ssr')
+        expect($('p').text()).toMatch(
+          /^file:\/\/.*\/next-install-[^/]+\/apps\/web\/app\/import-meta-url-encoded-ssr\/with%20space.ts$/
+        )
+      })
+
+      it('should encode special chars on client-side', async () => {
+        const browser = await next.browser('/import-meta-url-encoded-ssr')
+        await waitForNoRedbox(browser)
+        if (isTurbopack) {
+          // Turbopack intentionally doesn't expose the full path to the browser bundles
+          expect(await browser.elementByCss('p').text()).toBe(
+            'file:///ROOT/apps/web/app/import-meta-url-encoded-ssr/with%20space.ts'
+          )
+        } else {
+          expect(await browser.elementByCss('p').text()).toMatch(
+            /^file:\/\/.*\/next-install-[^/]+\/apps\/web\/app\/import-meta-url-encoded-ssr\/with%20space.ts$/
+          )
+        }
+        await browser.close()
+      })
+    })
   })
 
   if (isNextDev) {
     describe('source-maps', () => {
       it('should work on RSC', async () => {
         const browser = await next.browser('/source-maps-rsc')
-        await assertHasRedbox(browser)
+        await waitForRedbox(browser)
 
         if (isTurbopack) {
           // TODO the function name should be hidden
@@ -148,7 +181,7 @@ describe('non-root-project-monorepo', () => {
 
       it('should work on SSR', async () => {
         const browser = await next.browser('/source-maps-ssr')
-        await assertHasRedbox(browser)
+        await waitForRedbox(browser)
 
         if (isTurbopack) {
           // TODO the function name should be hidden
@@ -211,7 +244,7 @@ describe('non-root-project-monorepo', () => {
 
       it('should work on client-side', async () => {
         const browser = await next.browser('/source-maps-client')
-        await assertHasRedbox(browser)
+        await waitForRedbox(browser)
 
         if (isTurbopack) {
           // TODO the function name should be hidden

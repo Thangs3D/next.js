@@ -1,9 +1,12 @@
 ---
 title: refresh
 description: API Reference for the refresh function.
+related:
+  links:
+    - app/guides/server-actions
 ---
 
-`refresh` allows you to refresh the client router from within a [Server Action](/docs/app/getting-started/updating-data).
+`refresh` allows you to refresh the client router from within a [Server Action](/docs/app/guides/server-actions).
 
 ## Usage
 
@@ -25,7 +28,6 @@ refresh(): void;
 'use server'
 
 import { refresh } from 'next/cache'
-import { redirect } from 'next/navigation'
 
 export async function createPost(formData: FormData) {
   const title = formData.get('title')
@@ -44,7 +46,6 @@ export async function createPost(formData: FormData) {
 'use server'
 
 import { refresh } from 'next/cache'
-import { redirect } from 'next/navigation'
 
 export async function createPost(formData) {
   const title = formData.get('title')

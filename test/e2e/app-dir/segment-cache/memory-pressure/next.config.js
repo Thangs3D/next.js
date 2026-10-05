@@ -3,7 +3,9 @@
  */
 const nextConfig = {
   cacheComponents: true,
-  experimental: { clientSegmentCache: true },
+  experimental: {
+    prefetchInlining: false,
+  },
 }
 
 module.exports = nextConfig

@@ -17,7 +17,6 @@ import {
   NEXT_CACHE_TAGS_HEADER,
   NEXT_DATA_SUFFIX,
   NEXT_META_SUFFIX,
-  RSC_PREFETCH_SUFFIX,
   RSC_SEGMENT_SUFFIX,
   RSC_SEGMENTS_DIR_SUFFIX,
   RSC_SUFFIX,
@@ -231,10 +230,13 @@ export default class FileSystemCache implements CacheHandler {
             }
 
             let rscData: Buffer | undefined
-            if (!ctx.isFallback) {
+            if (
+              !ctx.isFallback &&
+              (!ctx.isRoutePPREnabled || meta?.postponed == null)
+            ) {
               rscData = await this.fs.readFile(
                 this.getFilePath(
-                  `${key}${ctx.isRoutePPREnabled ? RSC_PREFETCH_SUFFIX : RSC_SUFFIX}`,
+                  `${key}${RSC_SUFFIX}`,
                   IncrementalCacheKind.APP_PAGE
                 )
               )
@@ -387,6 +389,7 @@ export default class FileSystemCache implements CacheHandler {
         status: data.status,
         postponed: undefined,
         segmentPaths: undefined,
+        prefetchHints: undefined,
       }
 
       writer.append(
@@ -411,17 +414,12 @@ export default class FileSystemCache implements CacheHandler {
         }
       } else {
         writer.append(htmlPath, data.html)
+
         // Fallbacks don't generate a data file.
-        if (!ctx.fetchCache && !ctx.isFallback) {
+        if (!ctx.fetchCache && !ctx.isFallback && !ctx.isRoutePPREnabled) {
           writer.append(
             this.getFilePath(
-              `${key}${
-                isAppPath
-                  ? ctx.isRoutePPREnabled
-                    ? RSC_PREFETCH_SUFFIX
-                    : RSC_SUFFIX
-                  : NEXT_DATA_SUFFIX
-              }`,
+              `${key}${isAppPath ? RSC_SUFFIX : NEXT_DATA_SUFFIX}`,
               isAppPath
                 ? IncrementalCacheKind.APP_PAGE
                 : IncrementalCacheKind.PAGES
@@ -452,6 +450,7 @@ export default class FileSystemCache implements CacheHandler {
             status: data.status,
             postponed: data.postponed,
             segmentPaths,
+            prefetchHints: undefined,
           }
 
           writer.append(
@@ -475,26 +474,31 @@ export default class FileSystemCache implements CacheHandler {
     await writer.wait()
   }
 
-  private getFilePath(pathname: string, kind: IncrementalCacheKind): string {
+  private getFilePath(key: string, kind: IncrementalCacheKind): string {
+    let rootDir: string
     switch (kind) {
       case IncrementalCacheKind.FETCH:
         // we store in .next/cache/fetch-cache so it can be persisted
         // across deploys
-        return path.join(
-          this.serverDistDir,
-          '..',
-          'cache',
-          'fetch-cache',
-          pathname
-        )
+        rootDir = path.join(this.serverDistDir, '..', 'cache', 'fetch-cache')
+        break
       case IncrementalCacheKind.PAGES:
-        return path.join(this.serverDistDir, 'pages', pathname)
+        rootDir = path.join(this.serverDistDir, 'pages')
+        break
       case IncrementalCacheKind.IMAGE:
       case IncrementalCacheKind.APP_PAGE:
       case IncrementalCacheKind.APP_ROUTE:
-        return path.join(this.serverDistDir, 'app', pathname)
+        rootDir = path.join(this.serverDistDir, 'app')
+        break
       default:
         throw new Error(`Unexpected file path kind: ${kind}`)
     }
+
+    const filePath = path.join(rootDir, key)
+    if (!(filePath.startsWith(rootDir + path.sep) || filePath === rootDir)) {
+      throw new Error(`Invalid file path: ${filePath}`)
+    }
+
+    return filePath
   }
 }

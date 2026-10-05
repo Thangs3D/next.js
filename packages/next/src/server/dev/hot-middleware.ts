@@ -31,6 +31,10 @@ import { HMR_MESSAGE_SENT_TO_BROWSER } from './hot-reloader-types'
 import { devIndicatorServerState } from './dev-indicator-server-state'
 import { createBinaryHmrMessageData } from './messages'
 import type { NextConfigComplete } from '../config-shared'
+import {
+  getRequestInsightsSnapshot,
+  isRequestInsightsEnabled,
+} from '../lib/trace/request-insights'
 
 function isMiddlewareStats(stats: webpack.Stats) {
   for (const key of stats.compilation.entrypoints.keys()) {
@@ -71,8 +75,8 @@ function getStatsForSyncEvent(
 }
 
 export class WebpackHotMiddleware {
-  private clientsWithoutRequestId = new Set<ws>()
-  private clientsByRequestId: Map<string, ws> = new Map()
+  private clientsWithoutHtmlRequestId = new Set<ws>()
+  private clientsByHtmlRequestId: Map<string, ws> = new Map()
   private closed = false
   private clientLatestStats: { ts: number; stats: webpack.Stats } | null = null
   private middlewareLatestStats: { ts: number; stats: webpack.Stats } | null =
@@ -163,20 +167,20 @@ export class WebpackHotMiddleware {
    * and we still want to show the client overlay with the error while
    * the error page should be rendered just fine.
    */
-  onHMR = (client: ws, requestId: string | null) => {
+  onHMR = (client: ws, htmlRequestId: string | null) => {
     if (this.closed) return
 
-    if (requestId) {
-      this.clientsByRequestId.set(requestId, client)
+    if (htmlRequestId) {
+      this.clientsByHtmlRequestId.set(htmlRequestId, client)
     } else {
-      this.clientsWithoutRequestId.add(client)
+      this.clientsWithoutHtmlRequestId.add(client)
     }
 
     client.addEventListener('close', () => {
-      if (requestId) {
-        this.clientsByRequestId.delete(requestId)
+      if (htmlRequestId) {
+        this.clientsByHtmlRequestId.delete(htmlRequestId)
       } else {
-        this.clientsWithoutRequestId.delete(client)
+        this.clientsWithoutHtmlRequestId.delete(client)
       }
     })
 
@@ -207,6 +211,10 @@ export class WebpackHotMiddleware {
         },
         devIndicator: devIndicatorServerState,
         devToolsConfig: this.devToolsConfig,
+        requestInsights:
+          this.config.experimental.requestInsights || isRequestInsightsEnabled()
+            ? getRequestInsightsSnapshot()
+            : undefined,
       })
     }
   }
@@ -228,8 +236,8 @@ export class WebpackHotMiddleware {
     })
   }
 
-  getClient = (requestId: string): ws | undefined => {
-    return this.clientsByRequestId.get(requestId)
+  getClient = (htmlRequestId: string): ws | undefined => {
+    return this.clientsByHtmlRequestId.get(htmlRequestId)
   }
 
   publishToClient = (client: ws, message: HmrMessageSentToBrowser) => {
@@ -251,8 +259,8 @@ export class WebpackHotMiddleware {
     }
 
     for (const wsClient of [
-      ...this.clientsWithoutRequestId,
-      ...this.clientsByRequestId.values(),
+      ...this.clientsWithoutHtmlRequestId,
+      ...this.clientsByHtmlRequestId.values(),
     ]) {
       this.publishToClient(wsClient, message)
     }
@@ -270,12 +278,12 @@ export class WebpackHotMiddleware {
     // inferring it from the presence of a request ID.
 
     if (!this.config.cacheComponents) {
-      for (const wsClient of this.clientsByRequestId.values()) {
+      for (const wsClient of this.clientsByHtmlRequestId.values()) {
         this.publishToClient(wsClient, message)
       }
     }
 
-    for (const wsClient of this.clientsWithoutRequestId) {
+    for (const wsClient of this.clientsWithoutHtmlRequestId) {
       this.publishToClient(wsClient, message)
     }
   }
@@ -290,30 +298,35 @@ export class WebpackHotMiddleware {
     this.closed = true
 
     for (const wsClient of [
-      ...this.clientsWithoutRequestId,
-      ...this.clientsByRequestId.values(),
+      ...this.clientsWithoutHtmlRequestId,
+      ...this.clientsByHtmlRequestId.values(),
     ]) {
       // it's okay to not cleanly close these websocket connections, this is dev
       wsClient.terminate()
     }
 
-    this.clientsWithoutRequestId.clear()
-    this.clientsByRequestId.clear()
+    this.clientsWithoutHtmlRequestId.clear()
+    this.clientsByHtmlRequestId.clear()
   }
 
-  deleteClient = (client: ws, requestId: string | null) => {
-    if (requestId) {
-      this.clientsByRequestId.delete(requestId)
+  deleteClient = (client: ws, htmlRequestId: string | null) => {
+    if (htmlRequestId) {
+      this.clientsByHtmlRequestId.delete(htmlRequestId)
     } else {
-      this.clientsWithoutRequestId.delete(client)
+      this.clientsWithoutHtmlRequestId.delete(client)
     }
   }
 
   hasClients = () => {
-    return this.clientsWithoutRequestId.size + this.clientsByRequestId.size > 0
+    return (
+      this.clientsWithoutHtmlRequestId.size + this.clientsByHtmlRequestId.size >
+      0
+    )
   }
 
   getClientCount = () => {
-    return this.clientsWithoutRequestId.size + this.clientsByRequestId.size
+    return (
+      this.clientsWithoutHtmlRequestId.size + this.clientsByHtmlRequestId.size
+    )
   }
 }

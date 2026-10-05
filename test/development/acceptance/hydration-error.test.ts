@@ -1,10 +1,9 @@
 import { createSandbox } from 'development-sandbox'
-import { FileRef, nextTestSetup } from 'e2e-utils'
+import { FileRef, isReact18, nextTestSetup } from 'e2e-utils'
 import path from 'path'
 import { outdent } from 'outdent'
 import { getRedboxTotalErrorCount, retry } from 'next-test-utils'
 
-const isReact18 = parseInt(process.env.NEXT_TEST_REACT_VERSION) === 18
 // https://github.com/facebook/react/blob/main/packages/react-dom/src/__tests__/ReactDOMHydrationDiff-test.js used as a reference
 
 describe('Error overlay for hydration errors in Pages router', () => {
@@ -141,7 +140,7 @@ describe('Error overlay for hydration errors in Pages router', () => {
     `
     )
 
-    await session.assertNoRedbox()
+    await session.waitForNoRedbox()
 
     expect(await browser.elementByCss('.child').text()).toBe('Value')
   })
@@ -1175,6 +1174,6 @@ describe('Error overlay for hydration errors in Pages router', () => {
     )
     const { session } = sandbox
     // FIXME: Should have a redbox just like with App router
-    await session.assertNoRedbox()
+    await session.waitForNoRedbox()
   })
 })
